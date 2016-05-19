@@ -304,6 +304,7 @@ ngx_http_redis_create_request(ngx_http_request_t *r)
     ngx_http_redis_ctx_t           *ctx;
     ngx_http_variable_value_t      *vv[3];
     ngx_http_redis_loc_conf_t      *rlcf;
+    u_char                          lenbuf[NGX_INT_T_LEN];
 
     rlcf = ngx_http_get_module_loc_conf(r, ngx_http_redis_module);
 
@@ -312,7 +313,9 @@ ngx_http_redis_create_request(ngx_http_request_t *r)
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "no auth command provided" );
     } else {
-        len += sizeof("auth ") - 1 + vv[0]->len;
+        len += sizeof("*2\r\n$4\r\nauth\r\n$") - 1;
+        len += ngx_sprintf(lenbuf, "%d", vv[0]->len) - lenbuf;
+        len += sizeof(CRLF) - 1 + vv[0]->len;
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "auth info: %s", vv[0]->data);
     }
@@ -329,9 +332,11 @@ ngx_http_redis_create_request(ngx_http_request_t *r)
     if (vv[1] == NULL || vv[1]->not_found || vv[1]->len == 0) {
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "select 0 redis database" );
-        len += sizeof("select 0") - 1;
+        len += sizeof("*2\r\n$6\r\nselect\r\n$1\r\n0") - 1;
     } else {
-        len += sizeof("select ") - 1 + vv[1]->len;
+        len += sizeof("*2\r\n$6\r\nselect\r\n$") - 1;
+        len += ngx_sprintf(lenbuf, "%d", vv[1]->len) - lenbuf;
+        len += sizeof(CRLF) - 1 + vv[1]->len;
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "select %s redis database", vv[1]->data);
     }
@@ -349,7 +354,9 @@ ngx_http_redis_create_request(ngx_http_request_t *r)
     /* Count have space required escape symbols. */
     escape = 2 * ngx_escape_uri(NULL, vv[2]->data, vv[2]->len, NGX_ESCAPE_REDIS);
 
-    len += sizeof("get ") - 1 + vv[2]->len + escape + sizeof(CRLF) - 1;
+    len += sizeof("*2\r\n$3\r\nget\r\n$") - 1;
+    len += ngx_sprintf(lenbuf, "%d", vv[2]->len) - lenbuf;
+    len += sizeof(CRLF) - 1 + vv[2]->len + escape + sizeof(CRLF) - 1;
 
     /* Create temporary buffer for request with size len. */
     b = ngx_create_temp_buf(r->pool, len);
@@ -370,16 +377,10 @@ ngx_http_redis_create_request(ngx_http_request_t *r)
     /* add "auth " for request */
     if (vv[0] != NULL && !(vv[0]->not_found) && vv[0]->len != 0) {
         /* Add "auth " for request. */
-        *b->last++ = 'a'; *b->last++ = 'u'; *b->last++ = 't'; *b->last++ = 'h';
-        *b->last++ = ' ';
+        b->last = ngx_sprintf(b->last, "*2\r\n$4\r\nauth\r\n$%d\r\n", vv[0]->len);
         b->last = ngx_copy(b->last, vv[0]->data, vv[0]->len);
-        /* Add "\r\n". */
         *b->last++ = CR; *b->last++ = LF;
     }
-
-    /* Add "select " for request. */
-    *b->last++ = 's'; *b->last++ = 'e'; *b->last++ = 'l'; *b->last++ = 'e';
-    *b->last++ = 'c'; *b->last++ = 't'; *b->last++ = ' ';
 
     /* Get context redis_db from configuration file. */
     ctx = ngx_http_get_module_ctx(r, ngx_http_redis_module);
@@ -391,10 +392,11 @@ ngx_http_redis_create_request(ngx_http_request_t *r)
      * othervise add real number from context.
      */
     if (vv[1] == NULL || vv[1]->not_found || vv[1]->len == 0) {
+        b->last = ngx_sprintf(b->last, "*2\r\n$6\r\nselect\r\n$1\r\n0");
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                        "select 0 redis database" );
-        *b->last++ = '0';
     } else {
+        b->last = ngx_sprintf(b->last, "*2\r\n$6\r\nselect\r\n$%d\r\n", vv[1]->len);
         b->last = ngx_copy(b->last, vv[1]->data, vv[1]->len);
         ctx->key.len = b->last - ctx->key.data;
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
@@ -404,9 +406,7 @@ ngx_http_redis_create_request(ngx_http_request_t *r)
     /* Add "\r\n". */
     *b->last++ = CR; *b->last++ = LF;
 
-
-    /* Add "get" command with space. */
-    *b->last++ = 'g'; *b->last++ = 'e'; *b->last++ = 't'; *b->last++ = ' ';
+    b->last = ngx_sprintf(b->last, "*2\r\n$3\r\nget\r\n$%d\r\n", vv[2]->len);
 
     /* Get context redis_key from nginx.conf. */
     ctx = ngx_http_get_module_ctx(r, ngx_http_redis_module);
@@ -461,7 +461,10 @@ ngx_http_redis_process_header(ngx_http_request_t *r)
     ngx_http_upstream_t       *u;
     ngx_http_redis_ctx_t      *ctx;
     ngx_http_redis_loc_conf_t *rlcf;
+
     ngx_http_variable_value_t *vv;
+    vv = ngx_http_get_indexed_variable(r, ngx_http_redis_auth_index);
+    ngx_int_t no_auth_cmd = (vv == NULL || vv->not_found || vv->len == 0);
 
     c = try = 0;
 
@@ -482,12 +485,16 @@ ngx_http_redis_process_header(ngx_http_request_t *r)
      * "12345678" is value of $redis_key, the string.
      *
      * So, if the first symbol is:
-     * "+" (good answer) - try to find 2 strings;
+     * "+" (good answer) - try to find 2 or 3 strings;
      * "-" (bad answer) - try to find 1 string;
      * othervise answer is invalid.
      */
     if (*p == '+') {
-        try = 3;
+        if (no_auth_cmd) {
+            try = 2;
+        } else {
+            try = 3;
+        }
     } else if (*p == '-') {
         try = 1;
     } else {
@@ -536,7 +543,7 @@ found:
 
     /* Compare pointer and good message, if yes move on the pointer */
     vv = ngx_http_get_indexed_variable(r, ngx_http_redis_auth_index);
-    if (vv == NULL || vv->not_found || vv->len == 0) {
+    if (no_auth_cmd) {
         if (ngx_strncmp(p, "+OK\r\n", sizeof("+OK\r\n") - 1) == 0) {
             p += sizeof("+OK\r\n") - 1;
         }

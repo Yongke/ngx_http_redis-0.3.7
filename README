@@ -1,9 +1,11 @@
-ngx_http_redis which supports redis "AUTH" command
---
+## ngx_http_redis which supports redis "AUTH" command
+
 Usage:
 ```
 set $redis_auth somepasswd;
 ```
+
+--------------------------
 
 nginx HTTP redis module
 --
